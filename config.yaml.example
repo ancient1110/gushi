@@ -11,9 +11,10 @@ source_priority:
 request_retries: 3
 request_backoff_seconds: 3
 request_pause_seconds: 1.5
+request_timeout_seconds: 15
 
-# 采集窗口（交易日）
-history_period: "3mo"
+# 采集窗口（交易日）：脚本会自动至少使用 45d（满足 20 日指标所需）
+history_period: "45d"
 
 # symbols 支持两种写法：
 # 1) 旧写法：直接字符串（默认各数据源都使用相同代码）
