@@ -151,6 +151,66 @@ def _get_akshare_spot_cache() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _load_akshare_module():
+    spec = importlib.util.find_spec("akshare")
+    if spec is None:
+        return None
+    return importlib.import_module("akshare")
+
+
+def _to_yfinance_cn_symbol(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
+        return f"{code}.SS"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        return f"{code}.SZ"
+    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
+        return f"{code}.BJ"
+    return code
+
+
+def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+    ak = _load_akshare_module()
+    if ak is None:
+        return None
+
+    spot = _get_akshare_spot_cache()
+    if spot is None or spot.empty or "代码" not in spot.columns or "名称" not in spot.columns:
+        return None
+
+    term = query.strip().lower()
+    exact = spot[(spot["代码"].astype(str).str.lower() == term) | (spot["名称"].astype(str).str.lower() == term)]
+    if exact.empty:
+        fuzzy = spot[
+            spot["代码"].astype(str).str.lower().str.contains(term, regex=False)
+            | spot["名称"].astype(str).str.lower().str.contains(term, regex=False)
+        ]
+        if fuzzy.empty:
+            return None
+        row = fuzzy.iloc[0]
+    else:
+        row = exact.iloc[0]
+
+    code = str(row["代码"]).zfill(6)
+    name = str(row["名称"])
+    return {
+        "name": name,
+        "symbol": code,
+        "cn_code": code,
+        "yfinance": _to_yfinance_cn_symbol(code),
+    }
+
+
+@lru_cache(maxsize=1)
+def _get_akshare_spot_cache() -> pd.DataFrame:
+    ak = _load_akshare_module()
+    if ak is None:
+        return pd.DataFrame()
+    try:
+        return ak.stock_zh_a_spot_em()
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+
+
 def build_quickstart_config() -> dict:
     """返回开箱即用的默认配置，用于 GUI 一键验证。"""
     return {
