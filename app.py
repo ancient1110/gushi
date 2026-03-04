@@ -30,6 +30,18 @@ def _parse_queries(raw_text: str) -> list[str]:
             ordered.append(token)
     return ordered
 
+
+
+def _resolve_symbols(terms: list[str]) -> tuple[list[dict], list[str]]:
+    resolved: list[dict] = []
+    errors: list[str] = []
+    for term in terms:
+        try:
+            resolved.append(find_symbol_by_name(term))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{term}: {exc}")
+    return resolved, errors
+
 st.set_page_config(page_title="行情采集助手", layout="wide")
 st.title("📈 行情采集助手")
 st.caption("输入名称/代码即可查询；支持 72h 分时细看（价格 + MACD/KDJ/RSI）。")
@@ -49,7 +61,12 @@ with col1:
             if not terms:
                 raise ValueError("请输入至少一个标的名称或代码")
 
-            symbols = [find_symbol_by_name(term) for term in terms]
+            symbols, errors = _resolve_symbols(terms)
+            if not symbols:
+                raise ValueError("未识别到有效标的")
+            if errors:
+                st.warning("以下输入未识别：" + "；".join(errors))
+
             cfg = build_quickstart_config()
             cfg["symbols"] = symbols
             summary_path, report_path = run_once(cfg)
@@ -72,7 +89,12 @@ with col2:
             if not terms:
                 raise ValueError("请输入至少一个标的名称或代码")
 
-            symbols = [find_symbol_by_name(term) for term in terms]
+            symbols, errors = _resolve_symbols(terms)
+            if not symbols:
+                raise ValueError("未识别到有效标的")
+            if errors:
+                st.warning("以下输入未识别：" + "；".join(errors))
+
             st.success(f"已识别 {len(symbols)} 个标的，开始获取近72h分时")
 
             for symbol in symbols:
