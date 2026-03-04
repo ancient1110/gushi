@@ -60,12 +60,35 @@ python market_bot.py --config config.yaml --once
 python market_bot.py --config config.yaml
 ```
 
-## 4) 图形化界面（更省事）
+## 4) 图形化界面（重点：Windows 也能直接用）
 
-如果你觉得命令行安装和使用太麻烦，可直接用图形界面：
+### 方式 A（推荐，跨平台）
+
+不依赖 `streamlit` 命令是否在 PATH，直接用 Python 模块方式：
 
 ```bash
+python launch_gui.py
+```
+
+### 方式 B（Windows 双击）
+
+直接双击仓库里的 `run_gui.bat`，它会自动：
+1. 创建 `.venv`（若不存在）
+2. 安装依赖
+3. 启动图形界面
+
+> 这样就不需要你手动敲 `streamlit run app.py`，也能避免“streamlit 未识别”问题。
+
+### 方式 C（你原来的命令）
+
+```powershell
 streamlit run app.py
+```
+
+如果报错“`streamlit` 不是内部或外部命令”，说明 `streamlit` 没装到当前 Python 环境，或脚本目录不在 PATH。请改用：
+
+```powershell
+python -m streamlit run app.py
 ```
 
 页面里可以：
@@ -81,7 +104,16 @@ streamlit run app.py
 10 18 * * * cd /你的路径/gushi && /你的路径/gushi/.venv/bin/python market_bot.py --config config.yaml --once >> cron.log 2>&1
 ```
 
-## 6) 注意事项
+## 6) 常见问题
+
+- **Q: PowerShell 报 `streamlit` 无法识别？**  
+  A: 用 `python -m streamlit run app.py` 或 `python launch_gui.py`，不要依赖全局 `streamlit` 命令。
+- **Q: 双击 `app.py` 没反应？**  
+  A: `app.py` 是 Streamlit 应用，不是普通 GUI 程序。请双击 `run_gui.bat`，或在终端执行 `python launch_gui.py`。
+- **Q: 依赖安装慢/失败？**  
+  A: 常见原因是网络或代理问题。可先执行 `python -m pip install -U pip`，然后重试 `pip install -r requirements.txt`。
+
+## 7) 注意事项
 
 - 公开行情接口可能波动，脚本会按 `source_priority` 自动切换数据源。
 - 如果出现 `Too Many Requests`，可提高 `request_pause_seconds`、`request_backoff_seconds`，或减少单次追踪标的数量。
