@@ -64,7 +64,7 @@ python market_bot.py --config config.yaml
 
 ### 方式 A（推荐，跨平台）
 
-不依赖 `streamlit` 命令是否在 PATH，直接用 Python 模块方式：
+自动创建 `.venv` 并检查依赖（缺少会自动安装），不依赖 `streamlit` 命令是否在 PATH：
 
 ```bash
 python launch_gui.py
@@ -107,11 +107,11 @@ python -m streamlit run app.py
 ## 6) 常见问题
 
 - **Q: PowerShell 报 `streamlit` 无法识别？**  
-  A: 用 `python -m streamlit run app.py` 或 `python launch_gui.py`，不要依赖全局 `streamlit` 命令。
+  A: 直接执行 `python launch_gui.py`（会自动建 `.venv` + 安装依赖），或手动用 `python -m streamlit run app.py`。
 - **Q: 双击 `app.py` 没反应？**  
   A: `app.py` 是 Streamlit 应用，不是普通 GUI 程序。请双击 `run_gui.bat`，或在终端执行 `python launch_gui.py`。
 - **Q: 依赖安装慢/失败？**  
-  A: 常见原因是网络或代理问题。可先执行 `python -m pip install -U pip`，然后重试 `pip install -r requirements.txt`。
+  A: 常见原因是网络或代理问题。可先执行 `python -m pip install -U pip`，然后重试 `pip install -r requirements.txt`。若你用 `python launch_gui.py`，它也会自动尝试安装。
 
 ## 7) 注意事项
 
