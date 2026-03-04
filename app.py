@@ -20,7 +20,7 @@ config_path = Path(config_path_str)
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    if st.button("加载配置", use_container_width=True):
+    if st.button("加载配置", width='stretch'):
         try:
             cfg = load_config(config_path)
             st.session_state["cfg_text"] = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
@@ -39,12 +39,12 @@ if "cfg_text" not in st.session_state:
 cfg_text = st.text_area("配置内容（可直接编辑）", value=st.session_state.get("cfg_text", ""), height=340)
 
 with col2:
-    if st.button("保存配置", use_container_width=True):
+    if st.button("保存配置", width='stretch'):
         config_path.write_text(cfg_text, encoding="utf-8")
         st.success(f"已保存到 {config_path}")
 
 st.info("不想先配配置？可直接使用内置“全市场概览”清单做一键验证。")
-if st.button("一键验证（免配置）", use_container_width=True):
+if st.button("一键验证（免配置）", width='stretch'):
     try:
         quick_cfg = build_quickstart_config()
         st.session_state["cfg_text"] = yaml.safe_dump(quick_cfg, sort_keys=False, allow_unicode=True)
@@ -54,12 +54,12 @@ if st.button("一键验证（免配置）", use_container_width=True):
         st.write(f"报告文件：`{report_path}`")
         df = pd.read_csv(summary_path)
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
     except Exception as exc:  # noqa: BLE001
         st.error(f"运行失败: {exc}")
 
 st.divider()
-if st.button("立即执行一次采集", type="primary", use_container_width=True):
+if st.button("立即执行一次采集", type="primary", width='stretch'):
     try:
         cfg = yaml.safe_load(cfg_text)
         cfg = validate_config(cfg)
@@ -71,7 +71,7 @@ if st.button("立即执行一次采集", type="primary", use_container_width=Tru
 
         df = pd.read_csv(summary_path)
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
         else:
             st.warning("本次没有成功采集到数据，请查看报告中的失败列表。")
 
