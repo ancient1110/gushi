@@ -309,6 +309,24 @@ def run_once(config: dict) -> Tuple[Path, Path]:
     return summary_path, report_path
 
 
+def _summary_to_markdown_table(summary_df: pd.DataFrame) -> str:
+    """将汇总表转换为 Markdown，避免依赖 tabulate。"""
+    if summary_df.empty:
+        return ""
+
+    headers = [str(col) for col in summary_df.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+
+    for row in summary_df.itertuples(index=False, name=None):
+        cells = [str(item).replace("\n", " ") for item in row]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    return "\n".join(lines)
+
+
 def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str]) -> None:
     ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -331,7 +349,7 @@ def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str
                 f"- 当日最弱: **{worst['symbol']}** (1日涨跌: {worst['ret_1d(%)']}%)",
                 "",
                 "## 明细表",
-                summary_df.to_markdown(index=False),
+                _summary_to_markdown_table(summary_df),
                 "",
             ]
         )

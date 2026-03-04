@@ -117,6 +117,10 @@ python -m streamlit run app.py
   A: 说明配置为空或字段不完整。请确保使用了仓库中的 `config.yaml.example`（先复制为 `config.yaml`），再根据需要修改。新版 GUI 会在配置为空时给出更明确提示。
 - **Q: 依赖安装慢/失败？**  
   A: 常见原因是网络或代理问题。可先执行 `python -m pip install -U pip`，然后重试 `pip install -r requirements.txt`。
+- **Q: 运行时提示 `Missing optional dependency tabulate`？**  
+  A: 新版已移除此依赖；若你仍遇到，更新到最新代码后重试，或临时执行 `pip install tabulate`。
+- **Q: 为什么提示有些标的拉取失败，但 `data/` 里还有很多 CSV？**  
+  A: 这是预期行为：脚本按“单个标的”处理，成功的会立刻写入 `data/`，失败的会记录到报告 `reports/report_*.md`。所以会出现“部分失败 + 部分成功文件并存”。
 
 ## 7) 注意事项
 

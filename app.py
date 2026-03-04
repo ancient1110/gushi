@@ -55,6 +55,7 @@ if st.button("一键验证（免配置）", use_container_width=True):
         df = pd.read_csv(summary_path)
         if not df.empty:
             st.dataframe(df, use_container_width=True)
+        st.info("提示：data 目录会按“成功抓取的标的”分别保存明细 CSV。若部分标的失败，你仍会看到已成功标的的数据文件，同时失败项会写入报告。")
     except Exception as exc:  # noqa: BLE001
         st.error(f"运行失败: {exc}")
 
@@ -75,6 +76,7 @@ if st.button("立即执行一次采集", type="primary", use_container_width=Tru
         else:
             st.warning("本次没有成功采集到数据，请查看报告中的失败列表。")
 
+        st.info("提示：data 目录会按“成功抓取的标的”分别保存明细 CSV。若部分标的失败，你仍会看到已成功标的的数据文件，同时失败项会写入报告。")
         report_text = Path(report_path).read_text(encoding="utf-8")
         st.markdown("### 报告预览")
         st.markdown(report_text)
