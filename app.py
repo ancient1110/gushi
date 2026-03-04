@@ -18,6 +18,18 @@ from market_bot import (
     validate_config,
 )
 
+
+
+def _parse_queries(raw_text: str) -> list[str]:
+    tokens = [token.strip() for token in raw_text.split() if token.strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ordered
+
 st.set_page_config(page_title="行情采集助手", layout="wide")
 st.title("📈 行情采集助手")
 st.caption("输入名称/代码即可查询；支持 72h 分时细看（价格 + MACD/KDJ/RSI）。")
@@ -27,18 +39,23 @@ if is_akshare_available():
 else:
     st.warning("未检测到 akshare。若要更稳地查询 A 股（如中国海油），请先执行：pip install akshare")
 
-query = st.text_input("输入标的名称或代码", placeholder="例如：标普500 / AAPL / QQQ")
+query = st.text_input("输入标的名称或代码（支持空格分隔多个）", placeholder="例如：标普500 AAPL QQQ")
 
 col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
     if st.button("快捷查询（日线摘要）", type="primary", width="stretch"):
         try:
-            symbol = find_symbol_by_name(query)
+            terms = _parse_queries(query)
+            if not terms:
+                raise ValueError("请输入至少一个标的名称或代码")
+
+            symbols = [find_symbol_by_name(term) for term in terms]
             cfg = build_quickstart_config()
-            cfg["symbols"] = [symbol]
+            cfg["symbols"] = symbols
             summary_path, report_path = run_once(cfg)
 
-            st.success(f"查询完成：{symbol['name']}")
+            st.success(f"查询完成：共 {len(symbols)} 个标的")
+            st.write("识别结果：" + "、".join(item["name"] for item in symbols))
             st.write(f"汇总文件：`{summary_path}`")
             st.write(f"报告文件：`{report_path}`")
 
@@ -51,20 +68,33 @@ with col1:
 with col2:
     if st.button("细看（近72h分时）", width="stretch"):
         try:
-            symbol = find_symbol_by_name(query)
-            display_name, intraday = fetch_intraday_detail_72h(symbol)
-            st.success(f"已获取 {display_name} 近72h分时")
+            terms = _parse_queries(query)
+            if not terms:
+                raise ValueError("请输入至少一个标的名称或代码")
 
-            latest = intraday.iloc[-1]
-            metric1, metric2, metric3, metric4 = st.columns(4)
-            metric1.metric("最新价格", f"{latest['Close']:.4f}")
-            metric2.metric("MACD(HIST)", f"{latest['MACD_HIST']:.4f}")
-            metric3.metric("KDJ(J)", f"{latest['J']:.2f}")
-            metric4.metric("RSI14", f"{latest['RSI14']:.2f}")
+            symbols = [find_symbol_by_name(term) for term in terms]
+            st.success(f"已识别 {len(symbols)} 个标的，开始获取近72h分时")
 
-            st.line_chart(intraday[["Close", "MACD_DIF", "MACD_DEA"]], height=260, width="stretch")
-            st.line_chart(intraday[["K", "D", "J", "RSI14"]], height=260, width="stretch")
-            st.dataframe(intraday.tail(120), width="stretch")
+            for symbol in symbols:
+                display_name = symbol.get("name") if isinstance(symbol, dict) else str(symbol)
+                try:
+                    display_name, intraday = fetch_intraday_detail_72h(symbol)
+                except Exception as symbol_exc:  # noqa: BLE001
+                    st.error(f"{display_name} 细看失败: {symbol_exc}")
+                    continue
+
+                st.subheader(display_name)
+
+                latest = intraday.iloc[-1]
+                metric1, metric2, metric3, metric4 = st.columns(4)
+                metric1.metric("最新价格", f"{latest['Close']:.4f}")
+                metric2.metric("MACD(HIST)", f"{latest['MACD_HIST']:.4f}")
+                metric3.metric("KDJ(J)", f"{latest['J']:.2f}")
+                metric4.metric("RSI14", f"{latest['RSI14']:.2f}")
+
+                st.line_chart(intraday[["Close", "MACD_DIF", "MACD_DEA"]], height=260, width="stretch")
+                st.line_chart(intraday[["K", "D", "J", "RSI14"]], height=260, width="stretch")
+                st.dataframe(intraday.tail(120), width="stretch")
         except Exception as exc:  # noqa: BLE001
             st.error(f"细看失败: {exc}")
 
