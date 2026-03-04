@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import logging
 import re
@@ -56,6 +57,7 @@ def build_quickstart_config() -> dict:
         "request_retries": 2,
         "request_backoff_seconds": 3,
         "request_pause_seconds": 0.8,
+        "request_timeout_seconds": 15,
         "history_period": "3mo",
         "symbols": DEFAULT_QUICK_SYMBOLS,
         "output": {"data_dir": "data", "report_dir": "reports"},
@@ -170,6 +172,7 @@ def fetch_symbol_history_with_retry(
     retries: int,
     backoff_seconds: int,
     source_priority: list[str],
+    request_timeout_seconds: int,
 ) -> tuple[str, str, pd.DataFrame]:
     last_error: Exception | None = None
 
@@ -177,8 +180,16 @@ def fetch_symbol_history_with_retry(
         display_symbol, query_symbol = _resolve_symbol_by_source(raw_symbol, source)
         for attempt in range(1, retries + 1):
             try:
-                data = fetch_symbol_history(source, query_symbol, period)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(fetch_symbol_history, source, query_symbol, period)
+                    data = future.result(timeout=request_timeout_seconds)
                 return display_symbol, source, data
+            except concurrent.futures.TimeoutError:
+                last_error = TimeoutError(
+                    f"{display_symbol} via {source} 拉取超时（>{request_timeout_seconds}s）"
+                )
+                logging.warning("%s", last_error)
+                break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 message = str(exc).lower()
@@ -272,7 +283,8 @@ def run_once(config: dict) -> Tuple[Path, Path]:
     retries = int(config.get("request_retries", 3))
     backoff_seconds = int(config.get("request_backoff_seconds", 3))
     pause_seconds = float(config.get("request_pause_seconds", 1.5))
-    source_priority = config.get("source_priority", ["yfinance", "stooq"])
+    request_timeout_seconds = int(config.get("request_timeout_seconds", 15))
+    source_priority = list(config.get("source_priority", ["yfinance", "stooq"]))
 
     for raw_symbol in config["symbols"]:
         try:
@@ -282,11 +294,16 @@ def run_once(config: dict) -> Tuple[Path, Path]:
                 retries,
                 backoff_seconds,
                 source_priority,
+                request_timeout_seconds,
             )
             safe_name = symbol_name.replace("^", "IDX_").replace("/", "_")
             hist.to_csv(data_dir / f"{safe_name}_{date_tag}.csv")
             summaries.append(build_summary(symbol_name, source, calc_metrics(hist)))
             logging.info("完成: %s (source=%s)", symbol_name, source)
+            if source in source_priority and source_priority[0] != source:
+                source_priority.remove(source)
+                source_priority.insert(0, source)
+                logging.info("已更新数据源优先级（后续优先尝试）: %s", " -> ".join(source_priority))
         except Exception as e:  # noqa: BLE001
             msg = f"{raw_symbol}: {e}"
             errors.append(msg)
@@ -331,7 +348,7 @@ def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str
                 f"- 当日最弱: **{worst['symbol']}** (1日涨跌: {worst['ret_1d(%)']}%)",
                 "",
                 "## 明细表",
-                summary_df.to_markdown(index=False),
+                dataframe_to_markdown(summary_df),
                 "",
             ]
         )
@@ -341,6 +358,14 @@ def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str
         lines.extend([f"- {e}" for e in errors])
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def dataframe_to_markdown(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        logging.warning("缺少 tabulate，Markdown 表格降级为纯文本输出。建议安装: pip install tabulate")
+        return df.to_string(index=False)
 
 
 def schedule_jobs(config: dict) -> None:
