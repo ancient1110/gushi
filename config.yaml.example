@@ -1,0 +1,19 @@
+# 时区使用系统本地时区
+schedule_times:
+  - "18:10"
+
+# 采集窗口（交易日）
+history_period: "3mo"
+
+# 关注的指数与股票，可混合
+symbols:
+  - "^GSPC"   # 标普500
+  - "^IXIC"   # 纳斯达克
+  - "000001.SS" # 上证指数
+  - "0700.HK" # 腾讯
+  - "AAPL"
+  - "TSLA"
+
+output:
+  data_dir: "data"
+  report_dir: "reports"
