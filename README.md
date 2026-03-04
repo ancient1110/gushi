@@ -13,12 +13,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Windows PowerShell 请改用：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
 ## 2) 配置
 
 先复制配置模板：
 
 ```bash
 cp config.yaml.example config.yaml
+```
+
+Windows PowerShell 可用：
+
+```powershell
+Copy-Item config.yaml.example config.yaml
 ```
 
 然后修改：
@@ -55,5 +69,7 @@ python market_bot.py --config config.yaml
 ## 5) 注意事项
 
 - 数据来自公开行情接口，偶尔可能出现延迟或个别代码无数据。
+- 如果出现 `Too Many Requests`，可提高 `request_pause_seconds`、`request_backoff_seconds`，或减少单次追踪标的数量。
+- 即使本次全部标的都失败，脚本也会照常输出报告（含失败列表），不会因为汇总排序报错而中断。
 - 该脚本仅做信息汇总与量化观察，不构成投资建议。
 - 若你后续想加：微信/邮件推送、更多技术指标、回测模块，可以在此基础上扩展。
