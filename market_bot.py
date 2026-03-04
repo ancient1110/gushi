@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -15,6 +16,7 @@ import pandas as pd
 import schedule
 import yaml
 import yfinance as yf
+from pandas_datareader import data as web
 
 
 def setup_logger(verbose: bool = False) -> None:
@@ -41,42 +43,118 @@ def load_config(config_path: Path) -> dict:
     return cfg
 
 
-def fetch_symbol_history(symbol: str, period: str) -> pd.DataFrame:
-    logging.debug("拉取数据: %s", symbol)
-    df = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
-    if df.empty:
-        raise ValueError(f"{symbol} 无可用数据")
+def _period_to_start(period: str) -> dt.datetime:
+    now = dt.datetime.now()
+    match = re.match(r"^(\d+)([dwmy])$", period.strip().lower())
+    if not match:
+        return now - dt.timedelta(days=180)
 
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "d":
+        return now - dt.timedelta(days=amount)
+    if unit == "w":
+        return now - dt.timedelta(weeks=amount)
+    if unit == "m":
+        return now - dt.timedelta(days=amount * 30)
+    if unit == "y":
+        return now - dt.timedelta(days=amount * 365)
+    return now - dt.timedelta(days=180)
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+        "Open": "Open",
+        "High": "High",
+        "Low": "Low",
+        "Close": "Close",
+        "Volume": "Volume",
+    }
+    df = df.rename(columns=rename_map)
     keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-    df = df[keep_cols].copy()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df
+    out = df[keep_cols].copy()
+    out.index = pd.to_datetime(out.index).tz_localize(None)
+    return out.sort_index()
 
 
-def fetch_symbol_history_with_retry(symbol: str, period: str, retries: int, backoff_seconds: int) -> pd.DataFrame:
+def fetch_symbol_history(source: str, symbol: str, period: str) -> pd.DataFrame:
+    logging.debug("拉取数据: %s (%s)", symbol, source)
+
+    if source == "yfinance":
+        df = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+        if df.empty:
+            raise ValueError(f"{symbol} 无可用数据")
+        return _normalize_columns(df)
+
+    if source == "stooq":
+        start = _period_to_start(period)
+        df = web.DataReader(symbol, "stooq", start=start)
+        if df.empty:
+            raise ValueError(f"{symbol} 无可用数据")
+        return _normalize_columns(df)
+
+    raise ValueError(f"不支持的数据源: {source}")
+
+
+def _resolve_symbol_by_source(raw_symbol: str | dict, source: str) -> tuple[str, str]:
+    if isinstance(raw_symbol, str):
+        return raw_symbol, raw_symbol
+
+    display = raw_symbol.get("name") or raw_symbol.get("symbol") or "unknown"
+    direct_key = raw_symbol.get(source)
+    if direct_key:
+        return display, direct_key
+
+    fallback = raw_symbol.get("symbol")
+    if fallback:
+        return display, fallback
+
+    raise ValueError(f"标的缺少可用代码: {raw_symbol}")
+
+
+def fetch_symbol_history_with_retry(
+    raw_symbol: str | dict,
+    period: str,
+    retries: int,
+    backoff_seconds: int,
+    source_priority: list[str],
+) -> tuple[str, str, pd.DataFrame]:
     last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            return fetch_symbol_history(symbol, period)
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            message = str(exc).lower()
-            is_rate_limited = "too many requests" in message or "rate limited" in message
-            if attempt >= retries:
-                break
 
-            wait_seconds = backoff_seconds * attempt if is_rate_limited else 1
-            logging.warning(
-                "拉取失败（%s，第 %s/%s 次），%s 秒后重试: %s",
-                symbol,
-                attempt,
-                retries,
-                wait_seconds,
-                exc,
-            )
-            time.sleep(wait_seconds)
+    for source in source_priority:
+        display_symbol, query_symbol = _resolve_symbol_by_source(raw_symbol, source)
+        for attempt in range(1, retries + 1):
+            try:
+                data = fetch_symbol_history(source, query_symbol, period)
+                return display_symbol, source, data
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                message = str(exc).lower()
+                is_rate_limited = "too many requests" in message or "rate limited" in message
+                if attempt >= retries:
+                    break
 
-    raise ValueError(f"{symbol} 多次拉取失败: {last_error}") from last_error
+                wait_seconds = backoff_seconds * attempt if is_rate_limited else 1
+                logging.warning(
+                    "拉取失败（%s via %s，第 %s/%s 次），%s 秒后重试: %s",
+                    display_symbol,
+                    source,
+                    attempt,
+                    retries,
+                    wait_seconds,
+                    exc,
+                )
+                time.sleep(wait_seconds)
+
+        logging.warning("数据源 %s 失败，尝试下一个数据源: %s", source, display_symbol)
+
+    target_label = raw_symbol if isinstance(raw_symbol, str) else raw_symbol.get("name", raw_symbol)
+    raise ValueError(f"{target_label} 多数据源拉取失败: {last_error}") from last_error
 
 
 def calc_metrics(df: pd.DataFrame) -> Dict[str, float]:
@@ -118,9 +196,10 @@ def generate_signal(metrics: Dict[str, float]) -> str:
     return "偏弱"
 
 
-def build_summary(symbol: str, metrics: Dict[str, float]) -> Dict[str, object]:
+def build_summary(symbol: str, source: str, metrics: Dict[str, float]) -> Dict[str, object]:
     return {
         "symbol": symbol,
+        "source": source,
         "last_close": round(metrics["last_close"], 4),
         "ret_1d(%)": round(metrics["ret_1d"] * 100, 2),
         "ret_5d(%)": round(metrics["ret_5d"] * 100, 2),
@@ -145,19 +224,26 @@ def run_once(config: dict) -> Tuple[Path, Path]:
     retries = int(config.get("request_retries", 3))
     backoff_seconds = int(config.get("request_backoff_seconds", 3))
     pause_seconds = float(config.get("request_pause_seconds", 1.5))
+    source_priority = config.get("source_priority", ["yfinance", "stooq"])
 
-    for symbol in config["symbols"]:
+    for raw_symbol in config["symbols"]:
         try:
-            hist = fetch_symbol_history_with_retry(symbol, config["history_period"], retries, backoff_seconds)
-            hist.to_csv(data_dir / f"{symbol.replace('^', 'IDX_')}_{date_tag}.csv")
-            summaries.append(build_summary(symbol, calc_metrics(hist)))
-            logging.info("完成: %s", symbol)
+            symbol_name, source, hist = fetch_symbol_history_with_retry(
+                raw_symbol,
+                config["history_period"],
+                retries,
+                backoff_seconds,
+                source_priority,
+            )
+            safe_name = symbol_name.replace("^", "IDX_").replace("/", "_")
+            hist.to_csv(data_dir / f"{safe_name}_{date_tag}.csv")
+            summaries.append(build_summary(symbol_name, source, calc_metrics(hist)))
+            logging.info("完成: %s (source=%s)", symbol_name, source)
         except Exception as e:  # noqa: BLE001
-            msg = f"{symbol}: {e}"
+            msg = f"{raw_symbol}: {e}"
             errors.append(msg)
             logging.warning("失败: %s", msg)
 
-        # 避免连续请求过快触发公开接口限流
         time.sleep(pause_seconds)
 
     summary_df = pd.DataFrame(summaries)
@@ -218,9 +304,6 @@ def schedule_jobs(config: dict) -> None:
     logging.info("调度器启动，按 Ctrl+C 退出")
     while True:
         schedule.run_pending()
-        # 这里不用 time.sleep 会导致空转占用 CPU
-        import time
-
         time.sleep(30)
 
 
