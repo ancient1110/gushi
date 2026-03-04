@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import importlib
 import logging
 import re
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -48,6 +50,66 @@ DEFAULT_QUICK_SYMBOLS = [
     {"name": "黄金ETF", "yfinance": "GLD", "stooq": "GLD.US"},
     {"name": "原油ETF", "yfinance": "USO", "stooq": "USO.US"},
 ]
+
+
+def _load_akshare_module():
+    spec = importlib.util.find_spec("akshare")
+    if spec is None:
+        return None
+    return importlib.import_module("akshare")
+
+
+def _to_yfinance_cn_symbol(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
+        return f"{code}.SS"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        return f"{code}.SZ"
+    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
+        return f"{code}.BJ"
+    return code
+
+
+def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+    ak = _load_akshare_module()
+    if ak is None:
+        return None
+
+    spot = _get_akshare_spot_cache()
+    if spot is None or spot.empty or "代码" not in spot.columns or "名称" not in spot.columns:
+        return None
+
+    term = query.strip().lower()
+    exact = spot[(spot["代码"].astype(str).str.lower() == term) | (spot["名称"].astype(str).str.lower() == term)]
+    if exact.empty:
+        fuzzy = spot[
+            spot["代码"].astype(str).str.lower().str.contains(term, regex=False)
+            | spot["名称"].astype(str).str.lower().str.contains(term, regex=False)
+        ]
+        if fuzzy.empty:
+            return None
+        row = fuzzy.iloc[0]
+    else:
+        row = exact.iloc[0]
+
+    code = str(row["代码"]).zfill(6)
+    name = str(row["名称"])
+    return {
+        "name": name,
+        "symbol": code,
+        "cn_code": code,
+        "yfinance": _to_yfinance_cn_symbol(code),
+    }
+
+
+@lru_cache(maxsize=1)
+def _get_akshare_spot_cache() -> pd.DataFrame:
+    ak = _load_akshare_module()
+    if ak is None:
+        return pd.DataFrame()
+    try:
+        return ak.stock_zh_a_spot_em()
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
 
 
 def build_quickstart_config() -> dict:
@@ -216,6 +278,11 @@ def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> di
         if any(term in c for c in candidates if c):
             return item
 
+    # 回退：尝试实时 A 股库（akshare）
+    cn_symbol = _find_cn_symbol_by_akshare(query)
+    if cn_symbol is not None:
+        return cn_symbol
+
     raise ValueError(f"未找到匹配标的: {query}")
 
 
@@ -249,15 +316,50 @@ def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame]:
     """抓取近 72h（以 15m 颗粒度）并计算技术指标。"""
     display, query_symbol = _resolve_symbol_by_source(raw_symbol, "yfinance")
-    df = yf.Ticker(query_symbol).history(period="5d", interval="15m", auto_adjust=True)
-    if df.empty:
-        raise ValueError(f"{display} 72h 分时无可用数据")
-    df = _normalize_columns(df)
     cutoff = dt.datetime.now() - dt.timedelta(hours=72)
-    df = df[df.index >= cutoff]
-    if df.empty:
+
+    try:
+        df = yf.Ticker(query_symbol).history(period="5d", interval="15m", auto_adjust=True)
+        if not df.empty:
+            normalized = _normalize_columns(df)
+            normalized = normalized[normalized.index >= cutoff]
+            if not normalized.empty:
+                return display, _calc_intraday_indicators(normalized)
+    except Exception:  # noqa: BLE001
+        logging.info("yfinance 72h 分时失败，尝试 A 股数据源回退: %s", display)
+
+    ak = _load_akshare_module()
+    cn_code = raw_symbol.get("cn_code") if isinstance(raw_symbol, dict) else None
+    if ak is None or not cn_code:
+        raise ValueError(f"{display} 72h 分时无可用数据（建议安装 akshare 或检查标的代码）")
+
+    start = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    end = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    detail = ak.stock_zh_a_hist_min_em(symbol=cn_code, period="15", adjust="qfq", start_date=start, end_date=end)
+    if detail is None or detail.empty:
         raise ValueError(f"{display} 72h 分时无可用数据")
-    return display, _calc_intraday_indicators(df)
+
+    rename_map = {
+        "时间": "Datetime",
+        "开盘": "Open",
+        "收盘": "Close",
+        "最高": "High",
+        "最低": "Low",
+        "成交量": "Volume",
+    }
+    detail = detail.rename(columns=rename_map)
+    required = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
+    missing = [c for c in required if c not in detail.columns]
+    if missing:
+        raise ValueError(f"{display} 分时字段缺失: {missing}")
+
+    detail = detail[required].copy()
+    detail["Datetime"] = pd.to_datetime(detail["Datetime"])
+    detail = detail.set_index("Datetime").sort_index()
+    detail = detail[detail.index >= cutoff]
+    if detail.empty:
+        raise ValueError(f"{display} 72h 分时无可用数据")
+    return display, _calc_intraday_indicators(detail)
 
 
 def fetch_symbol_history_with_retry(
