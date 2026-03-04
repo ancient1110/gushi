@@ -94,6 +94,7 @@ python -m streamlit run app.py
 页面里可以：
 - 载入/编辑/保存 `config.yaml`
 - 一键执行采集
+- **一键验证（免配置）**：直接使用内置“全市场概览”清单抓取主流指数/ETF，开箱即用
 - 直接预览汇总表和报告
 
 ## 5) 推荐本地定时方式（更稳）
@@ -110,6 +111,10 @@ python -m streamlit run app.py
   A: 用 `python -m streamlit run app.py` 或 `python launch_gui.py`，不要依赖全局 `streamlit` 命令。
 - **Q: 双击 `app.py` 没反应？**  
   A: `app.py` 是 Streamlit 应用，不是普通 GUI 程序。请双击 `run_gui.bat`，或在终端执行 `python launch_gui.py`。
+- **Q: 第一次运行 Streamlit 出现“要输入 email”是啥？**  
+  A: 这是 Streamlit 的首次欢迎提示，不是本项目在收集邮箱。直接按回车跳过即可，后续不会影响使用。
+- **Q: GUI 里报 `配置缺少关键字段: schedule_times` 或 `NoneType is not subscriptable`？**  
+  A: 说明配置为空或字段不完整。请确保使用了仓库中的 `config.yaml.example`（先复制为 `config.yaml`），再根据需要修改。新版 GUI 会在配置为空时给出更明确提示。
 - **Q: 依赖安装慢/失败？**  
   A: 常见原因是网络或代理问题。可先执行 `python -m pip install -U pip`，然后重试 `pip install -r requirements.txt`。
 

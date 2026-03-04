@@ -28,19 +28,66 @@ def setup_logger(verbose: bool = False) -> None:
     )
 
 
+REQUIRED_CONFIG_KEYS = ["schedule_times", "history_period", "symbols", "output"]
+
+
+DEFAULT_QUICK_SYMBOLS = [
+    {"name": "标普500", "yfinance": "^GSPC", "stooq": "^SPX"},
+    {"name": "纳斯达克100", "yfinance": "^NDX", "stooq": "^NDQ"},
+    {"name": "道琼斯工业", "yfinance": "^DJI", "stooq": "^DJI"},
+    {"name": "罗素2000", "yfinance": "^RUT", "stooq": "^RUT"},
+    {"name": "VIX恐慌指数", "yfinance": "^VIX", "stooq": "^VIX"},
+    {"name": "美国总市场ETF", "yfinance": "VTI", "stooq": "VTI.US"},
+    {"name": "标普500ETF", "yfinance": "SPY", "stooq": "SPY.US"},
+    {"name": "纳指100ETF", "yfinance": "QQQ", "stooq": "QQQ.US"},
+    {"name": "道指ETF", "yfinance": "DIA", "stooq": "DIA.US"},
+    {"name": "中概互联网ETF", "yfinance": "KWEB", "stooq": "KWEB.US"},
+    {"name": "中国大盘ETF", "yfinance": "FXI", "stooq": "FXI.US"},
+    {"name": "黄金ETF", "yfinance": "GLD", "stooq": "GLD.US"},
+    {"name": "原油ETF", "yfinance": "USO", "stooq": "USO.US"},
+]
+
+
+def build_quickstart_config() -> dict:
+    """返回开箱即用的默认配置，用于 GUI 一键验证。"""
+    return {
+        "schedule_times": ["18:10"],
+        "source_priority": ["yfinance", "stooq"],
+        "request_retries": 2,
+        "request_backoff_seconds": 3,
+        "request_pause_seconds": 0.8,
+        "history_period": "3mo",
+        "symbols": DEFAULT_QUICK_SYMBOLS,
+        "output": {"data_dir": "data", "report_dir": "reports"},
+    }
+
+
+def validate_config(cfg: dict) -> dict:
+    if not isinstance(cfg, dict):
+        raise ValueError("配置内容必须是 YAML 对象（键值对），不能是空内容。")
+
+    for key in REQUIRED_CONFIG_KEYS:
+        if key not in cfg:
+            raise ValueError(f"配置缺少关键字段: {key}")
+
+    if not isinstance(cfg["schedule_times"], list) or not cfg["schedule_times"]:
+        raise ValueError("配置字段 schedule_times 必须是非空列表。")
+    if not isinstance(cfg["symbols"], list) or not cfg["symbols"]:
+        raise ValueError("配置字段 symbols 必须是非空列表。")
+    if not isinstance(cfg["output"], dict):
+        raise ValueError("配置字段 output 必须是对象，例如 output: {data_dir: data, report_dir: reports}。")
+
+    return cfg
+
+
 def load_config(config_path: Path) -> dict:
     if not config_path.exists():
         raise FileNotFoundError(f"找不到配置文件: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f)
 
-    required_keys = ["schedule_times", "history_period", "symbols", "output"]
-    for key in required_keys:
-        if key not in cfg:
-            raise ValueError(f"配置缺少关键字段: {key}")
-
-    return cfg
+    return validate_config(cfg)
 
 
 def _period_to_start(period: str) -> dt.datetime:
@@ -211,6 +258,7 @@ def build_summary(symbol: str, source: str, metrics: Dict[str, float]) -> Dict[s
 
 
 def run_once(config: dict) -> Tuple[Path, Path]:
+    config = validate_config(config)
     now = dt.datetime.now()
     date_tag = now.strftime("%Y%m%d_%H%M%S")
 
