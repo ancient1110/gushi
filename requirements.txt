@@ -3,3 +3,5 @@ numpy>=1.24.0
 yfinance>=0.2.40
 pyyaml>=6.0.0
 schedule>=1.2.0
+pandas-datareader>=0.10.0
+streamlit>=1.32.0
