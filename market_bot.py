@@ -10,6 +10,8 @@ import importlib
 import logging
 import re
 import time
+import urllib.parse
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -155,6 +157,46 @@ def _find_cn_symbol_by_akshare(query: str) -> dict | None:
         "yfinance": _to_yfinance_cn_symbol(code),
     }
 
+
+
+
+def _find_cn_symbol_by_sina_suggest(query: str) -> dict | None:
+    """使用新浪 suggest 接口动态解析 A 股名称/代码，降低对手工映射依赖。"""
+    term = query.strip()
+    if not term:
+        return None
+
+    url = (
+        "https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key="
+        + urllib.parse.quote(term)
+    )
+
+    try:
+        with urllib.request.urlopen(url, timeout=6) as response:  # noqa: S310
+            raw = response.read()
+        text = raw.decode("gbk", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return None
+
+    # 示例：var suggestvalue="11,600938,中国海油,600938,中国海油,0;...";
+    payload = text.split('"')
+    if len(payload) < 2 or not payload[1].strip():
+        return None
+
+    for item in payload[1].split(";"):
+        parts = item.split(",")
+        if len(parts) < 3:
+            continue
+        code = parts[1].strip()
+        name = parts[2].strip()
+        if re.fullmatch(r"\d{6}", code):
+            return {
+                "name": name or f"A股{code}",
+                "symbol": code,
+                "cn_code": code,
+                "yfinance": _to_yfinance_cn_symbol(code),
+            }
+    return None
 
 def _find_cn_symbol_offline(query: str) -> dict | None:
     term = query.strip().lower()
@@ -348,16 +390,21 @@ def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> di
     if offline_cn is not None:
         return offline_cn
 
-    # 回退 2：尝试实时 A 股库（akshare）
+    # 回退 2：在线名称检索（不依赖 akshare）
+    sina_symbol = _find_cn_symbol_by_sina_suggest(query)
+    if sina_symbol is not None:
+        return sina_symbol
+
+    # 回退 3：尝试实时 A 股库（akshare）
     cn_symbol = _find_cn_symbol_by_akshare(query)
     if cn_symbol is not None:
         return cn_symbol
 
     if not is_akshare_available():
         raise ValueError(
-            f"未找到匹配标的: {query}。当前未安装 akshare，建议先执行: pip install akshare"
+            f"未找到匹配标的: {query}。已尝试内置库与在线检索；如需更高成功率建议安装 akshare: pip install akshare"
         )
-    raise ValueError(f"未找到匹配标的: {query}（已尝试内置库和 akshare）")
+    raise ValueError(f"未找到匹配标的: {query}（已尝试内置库、在线检索和 akshare）")
 
 
 def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -471,7 +518,12 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
         raise ValueError(f"{display} 分时字段缺失: {missing}")
 
     detail = detail[required].copy()
-    detail["Datetime"] = pd.to_datetime(detail["Datetime"])
+    detail["Datetime"] = pd.to_datetime(detail["Datetime"], errors="coerce")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        detail[col] = pd.to_numeric(detail[col], errors="coerce")
+
+    detail = detail.dropna(subset=["Datetime", "Open", "High", "Low", "Close"])
+    detail["Volume"] = detail["Volume"].fillna(0.0)
     detail = detail.set_index("Datetime").sort_index()
     detail = detail[detail.index >= cutoff]
     if detail.empty:
