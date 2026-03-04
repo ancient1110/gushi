@@ -63,6 +63,7 @@ CN_COMMON_SYMBOLS = [
     {"name": "平安银行", "symbol": "000001", "cn_code": "000001", "yfinance": "000001.SZ"},
     {"name": "万科A", "symbol": "000002", "cn_code": "000002", "yfinance": "000002.SZ"},
     {"name": "中信证券", "symbol": "600030", "cn_code": "600030", "yfinance": "600030.SS"},
+    {"name": "湖南白银", "symbol": "002716", "cn_code": "002716", "yfinance": "002716.SZ"},
 ]
 
 
@@ -87,9 +88,45 @@ def _to_yfinance_cn_symbol(code: str) -> str:
     return code
 
 
-def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+def _to_prefixed_cn_symbol(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
+        return f"sh{code}"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        return f"sz{code}"
+    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
+        return f"bj{code}"
+    return code
+
+
+@lru_cache(maxsize=1)
+def _get_akshare_spot_cache() -> pd.DataFrame:
     ak = _load_akshare_module()
     if ak is None:
+        return pd.DataFrame()
+
+    # 优先实时全量快照，失败时回退到代码名称表
+    try:
+        spot = ak.stock_zh_a_spot_em()
+        if spot is not None and not spot.empty and {"代码", "名称"}.issubset(spot.columns):
+            return spot[["代码", "名称"]].copy()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        code_name = ak.stock_info_a_code_name()
+        if code_name is not None and not code_name.empty:
+            rename_map = {"code": "代码", "name": "名称"}
+            normalized = code_name.rename(columns=rename_map)
+            if {"代码", "名称"}.issubset(normalized.columns):
+                return normalized[["代码", "名称"]].copy()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return pd.DataFrame()
+
+
+def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+    if _load_akshare_module() is None:
         return None
 
     spot = _get_akshare_spot_cache()
@@ -138,77 +175,6 @@ def _find_cn_symbol_offline(query: str) -> dict | None:
             "yfinance": _to_yfinance_cn_symbol(term),
         }
     return None
-
-
-@lru_cache(maxsize=1)
-def _get_akshare_spot_cache() -> pd.DataFrame:
-    ak = _load_akshare_module()
-    if ak is None:
-        return pd.DataFrame()
-    try:
-        return ak.stock_zh_a_spot_em()
-    except Exception:  # noqa: BLE001
-        return pd.DataFrame()
-
-
-def _load_akshare_module():
-    spec = importlib.util.find_spec("akshare")
-    if spec is None:
-        return None
-    return importlib.import_module("akshare")
-
-
-def _to_yfinance_cn_symbol(code: str) -> str:
-    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
-        return f"{code}.SS"
-    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
-        return f"{code}.SZ"
-    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
-        return f"{code}.BJ"
-    return code
-
-
-def _find_cn_symbol_by_akshare(query: str) -> dict | None:
-    ak = _load_akshare_module()
-    if ak is None:
-        return None
-
-    spot = _get_akshare_spot_cache()
-    if spot is None or spot.empty or "代码" not in spot.columns or "名称" not in spot.columns:
-        return None
-
-    term = query.strip().lower()
-    exact = spot[(spot["代码"].astype(str).str.lower() == term) | (spot["名称"].astype(str).str.lower() == term)]
-    if exact.empty:
-        fuzzy = spot[
-            spot["代码"].astype(str).str.lower().str.contains(term, regex=False)
-            | spot["名称"].astype(str).str.lower().str.contains(term, regex=False)
-        ]
-        if fuzzy.empty:
-            return None
-        row = fuzzy.iloc[0]
-    else:
-        row = exact.iloc[0]
-
-    code = str(row["代码"]).zfill(6)
-    name = str(row["名称"])
-    return {
-        "name": name,
-        "symbol": code,
-        "cn_code": code,
-        "yfinance": _to_yfinance_cn_symbol(code),
-    }
-
-
-@lru_cache(maxsize=1)
-def _get_akshare_spot_cache() -> pd.DataFrame:
-    ak = _load_akshare_module()
-    if ak is None:
-        return pd.DataFrame()
-    try:
-        return ak.stock_zh_a_spot_em()
-    except Exception:  # noqa: BLE001
-        return pd.DataFrame()
 
 
 def build_quickstart_config() -> dict:
@@ -449,17 +415,54 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
 
     start = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     end = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    detail = ak.stock_zh_a_hist_min_em(symbol=cn_code, period="15", adjust="qfq", start_date=start, end_date=end)
+
+    detail: pd.DataFrame | None = None
+    em_error: Exception | None = None
+    try:
+        detail = ak.stock_zh_a_hist_min_em(
+            symbol=cn_code,
+            period="15",
+            adjust="qfq",
+            start_date=start,
+            end_date=end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        em_error = exc
+        logging.warning("akshare 东财分时接口失败（%s）: %s", display, exc)
+
     if detail is None or detail.empty:
+        # 回退：Sina 分时接口（通常不受东财 SSL 波动影响）
+        minute_symbols = [cn_code, _to_prefixed_cn_symbol(cn_code)]
+        for minute_symbol in minute_symbols:
+            try:
+                if hasattr(ak, "stock_zh_a_minute"):
+                    detail = ak.stock_zh_a_minute(symbol=minute_symbol, period="15", adjust="qfq")
+                    if detail is not None and not detail.empty:
+                        break
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("akshare 新浪分时接口失败（%s/%s）: %s", display, minute_symbol, exc)
+                if em_error is None:
+                    em_error = exc
+
+    if detail is None or detail.empty:
+        if em_error is not None:
+            raise ValueError(f"{display} 72h 分时拉取失败（数据源连接不稳定，请稍后重试）") from em_error
         raise ValueError(f"{display} 72h 分时无可用数据")
 
     rename_map = {
         "时间": "Datetime",
+        "day": "Datetime",
+        "date": "Datetime",
         "开盘": "Open",
+        "open": "Open",
         "收盘": "Close",
+        "close": "Close",
         "最高": "High",
+        "high": "High",
         "最低": "Low",
+        "low": "Low",
         "成交量": "Volume",
+        "volume": "Volume",
     }
     detail = detail.rename(columns=rename_map)
     required = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
