@@ -2,6 +2,11 @@
 schedule_times:
   - "18:10"
 
+# 数据源优先级（按顺序自动切换）
+source_priority:
+  - "yfinance"
+  - "stooq"
+
 # 请求控制（公开接口偶尔会限流）
 request_retries: 3
 request_backoff_seconds: 3
@@ -10,14 +15,22 @@ request_pause_seconds: 1.5
 # 采集窗口（交易日）
 history_period: "3mo"
 
-# 关注的指数与股票，可混合
+# symbols 支持两种写法：
+# 1) 旧写法：直接字符串（默认各数据源都使用相同代码）
+# 2) 新写法：按数据源写不同代码（推荐，提升回退成功率）
 symbols:
-  - "^GSPC"   # 标普500
-  - "^IXIC"   # 纳斯达克
-  - "000001.SS" # 上证指数
-  - "0700.HK" # 腾讯
-  - "AAPL"
-  - "TSLA"
+  - name: "标普500"
+    yfinance: "^GSPC"
+    stooq: "^SPX"
+  - name: "纳斯达克100"
+    yfinance: "^NDX"
+    stooq: "^NDQ"
+  - name: "苹果"
+    yfinance: "AAPL"
+    stooq: "AAPL.US"
+  - name: "特斯拉"
+    yfinance: "TSLA"
+    stooq: "TSLA.US"
 
 output:
   data_dir: "data"
