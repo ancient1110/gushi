@@ -98,6 +98,8 @@ python -m streamlit run app.py
 - **全市场一键验证（免配置）**
 
 > 若要查询 A 股（如“中国海油”）并获取更稳定的分时数据，请确保安装 `akshare`（已在 `requirements.txt` 中包含）。
+> 即使未安装 `akshare`，系统也内置了部分常见 A 股名称/代码映射（含中国海油）用于快捷查询。
+> 新版 GUI 会在未检测到 `akshare` 时给出明确安装提示（`pip install akshare`）。
 
 ## 5) 推荐本地定时方式（更稳）
 

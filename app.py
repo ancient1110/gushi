@@ -13,6 +13,7 @@ from market_bot import (
     build_quickstart_config,
     fetch_intraday_detail_72h,
     find_symbol_by_name,
+    is_akshare_available,
     run_once,
     validate_config,
 )
@@ -20,6 +21,11 @@ from market_bot import (
 st.set_page_config(page_title="行情采集助手", layout="wide")
 st.title("📈 行情采集助手")
 st.caption("输入名称/代码即可查询；支持 72h 分时细看（价格 + MACD/KDJ/RSI）。")
+
+if is_akshare_available():
+    st.success("已检测到 akshare：A 股名称检索和分时回退可用")
+else:
+    st.warning("未检测到 akshare。若要更稳地查询 A 股（如中国海油），请先执行：pip install akshare")
 
 query = st.text_input("输入标的名称或代码", placeholder="例如：标普500 / AAPL / QQQ")
 

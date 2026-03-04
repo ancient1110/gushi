@@ -51,6 +51,105 @@ DEFAULT_QUICK_SYMBOLS = [
     {"name": "原油ETF", "yfinance": "USO", "stooq": "USO.US"},
 ]
 
+# 常见 A 股离线映射（避免在 akshare 不可用时无法通过名称检索）
+CN_COMMON_SYMBOLS = [
+    {"name": "中国海油", "symbol": "600938", "cn_code": "600938", "yfinance": "600938.SS"},
+    {"name": "中国石油", "symbol": "601857", "cn_code": "601857", "yfinance": "601857.SS"},
+    {"name": "中国石化", "symbol": "600028", "cn_code": "600028", "yfinance": "600028.SS"},
+    {"name": "贵州茅台", "symbol": "600519", "cn_code": "600519", "yfinance": "600519.SS"},
+    {"name": "宁德时代", "symbol": "300750", "cn_code": "300750", "yfinance": "300750.SZ"},
+    {"name": "比亚迪", "symbol": "002594", "cn_code": "002594", "yfinance": "002594.SZ"},
+    {"name": "招商银行", "symbol": "600036", "cn_code": "600036", "yfinance": "600036.SS"},
+    {"name": "平安银行", "symbol": "000001", "cn_code": "000001", "yfinance": "000001.SZ"},
+    {"name": "万科A", "symbol": "000002", "cn_code": "000002", "yfinance": "000002.SZ"},
+    {"name": "中信证券", "symbol": "600030", "cn_code": "600030", "yfinance": "600030.SS"},
+]
+
+
+def _load_akshare_module():
+    spec = importlib.util.find_spec("akshare")
+    if spec is None:
+        return None
+    return importlib.import_module("akshare")
+
+
+def is_akshare_available() -> bool:
+    return _load_akshare_module() is not None
+
+
+def _to_yfinance_cn_symbol(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
+        return f"{code}.SS"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        return f"{code}.SZ"
+    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
+        return f"{code}.BJ"
+    return code
+
+
+def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+    ak = _load_akshare_module()
+    if ak is None:
+        return None
+
+    spot = _get_akshare_spot_cache()
+    if spot is None or spot.empty or "代码" not in spot.columns or "名称" not in spot.columns:
+        return None
+
+    term = query.strip().lower()
+    exact = spot[(spot["代码"].astype(str).str.lower() == term) | (spot["名称"].astype(str).str.lower() == term)]
+    if exact.empty:
+        fuzzy = spot[
+            spot["代码"].astype(str).str.lower().str.contains(term, regex=False)
+            | spot["名称"].astype(str).str.lower().str.contains(term, regex=False)
+        ]
+        if fuzzy.empty:
+            return None
+        row = fuzzy.iloc[0]
+    else:
+        row = exact.iloc[0]
+
+    code = str(row["代码"]).zfill(6)
+    name = str(row["名称"])
+    return {
+        "name": name,
+        "symbol": code,
+        "cn_code": code,
+        "yfinance": _to_yfinance_cn_symbol(code),
+    }
+
+
+def _find_cn_symbol_offline(query: str) -> dict | None:
+    term = query.strip().lower()
+    for item in CN_COMMON_SYMBOLS:
+        if term in {
+            str(item.get("name", "")).lower(),
+            str(item.get("symbol", "")).lower(),
+            str(item.get("cn_code", "")).lower(),
+            str(item.get("yfinance", "")).lower(),
+        }:
+            return item
+
+    if re.fullmatch(r"\d{6}", term):
+        return {
+            "name": f"A股{term}",
+            "symbol": term,
+            "cn_code": term,
+            "yfinance": _to_yfinance_cn_symbol(term),
+        }
+    return None
+
+
+@lru_cache(maxsize=1)
+def _get_akshare_spot_cache() -> pd.DataFrame:
+    ak = _load_akshare_module()
+    if ak is None:
+        return pd.DataFrame()
+    try:
+        return ak.stock_zh_a_spot_em()
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+
 
 def _load_akshare_module():
     spec = importlib.util.find_spec("akshare")
@@ -278,12 +377,21 @@ def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> di
         if any(term in c for c in candidates if c):
             return item
 
-    # 回退：尝试实时 A 股库（akshare）
+    # 回退 1：内置 A 股映射（离线可用）
+    offline_cn = _find_cn_symbol_offline(query)
+    if offline_cn is not None:
+        return offline_cn
+
+    # 回退 2：尝试实时 A 股库（akshare）
     cn_symbol = _find_cn_symbol_by_akshare(query)
     if cn_symbol is not None:
         return cn_symbol
 
-    raise ValueError(f"未找到匹配标的: {query}")
+    if not is_akshare_available():
+        raise ValueError(
+            f"未找到匹配标的: {query}。当前未安装 akshare，建议先执行: pip install akshare"
+        )
+    raise ValueError(f"未找到匹配标的: {query}（已尝试内置库和 akshare）")
 
 
 def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -329,7 +437,13 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
         logging.info("yfinance 72h 分时失败，尝试 A 股数据源回退: %s", display)
 
     ak = _load_akshare_module()
-    cn_code = raw_symbol.get("cn_code") if isinstance(raw_symbol, dict) else None
+    cn_code = None
+    if isinstance(raw_symbol, dict):
+        cn_code = raw_symbol.get("cn_code") or raw_symbol.get("symbol")
+        if cn_code and re.fullmatch(r"\d{6}", str(cn_code)):
+            cn_code = str(cn_code)
+        else:
+            cn_code = None
     if ak is None or not cn_code:
         raise ValueError(f"{display} 72h 分时无可用数据（建议安装 akshare 或检查标的代码）")
 
