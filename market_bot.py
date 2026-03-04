@@ -10,6 +10,8 @@ import importlib
 import logging
 import re
 import time
+import urllib.parse
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -51,19 +53,6 @@ DEFAULT_QUICK_SYMBOLS = [
     {"name": "原油ETF", "yfinance": "USO", "stooq": "USO.US"},
 ]
 
-# 常见 A 股离线映射（避免在 akshare 不可用时无法通过名称检索）
-CN_COMMON_SYMBOLS = [
-    {"name": "中国海油", "symbol": "600938", "cn_code": "600938", "yfinance": "600938.SS"},
-    {"name": "中国石油", "symbol": "601857", "cn_code": "601857", "yfinance": "601857.SS"},
-    {"name": "中国石化", "symbol": "600028", "cn_code": "600028", "yfinance": "600028.SS"},
-    {"name": "贵州茅台", "symbol": "600519", "cn_code": "600519", "yfinance": "600519.SS"},
-    {"name": "宁德时代", "symbol": "300750", "cn_code": "300750", "yfinance": "300750.SZ"},
-    {"name": "比亚迪", "symbol": "002594", "cn_code": "002594", "yfinance": "002594.SZ"},
-    {"name": "招商银行", "symbol": "600036", "cn_code": "600036", "yfinance": "600036.SS"},
-    {"name": "平安银行", "symbol": "000001", "cn_code": "000001", "yfinance": "000001.SZ"},
-    {"name": "万科A", "symbol": "000002", "cn_code": "000002", "yfinance": "000002.SZ"},
-    {"name": "中信证券", "symbol": "600030", "cn_code": "600030", "yfinance": "600030.SS"},
-]
 
 
 def _load_akshare_module():
@@ -87,9 +76,45 @@ def _to_yfinance_cn_symbol(code: str) -> str:
     return code
 
 
-def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+def _to_prefixed_cn_symbol(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
+        return f"sh{code}"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        return f"sz{code}"
+    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
+        return f"bj{code}"
+    return code
+
+
+@lru_cache(maxsize=1)
+def _get_akshare_spot_cache() -> pd.DataFrame:
     ak = _load_akshare_module()
     if ak is None:
+        return pd.DataFrame()
+
+    # 优先实时全量快照，失败时回退到代码名称表
+    try:
+        spot = ak.stock_zh_a_spot_em()
+        if spot is not None and not spot.empty and {"代码", "名称"}.issubset(spot.columns):
+            return spot[["代码", "名称"]].copy()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        code_name = ak.stock_info_a_code_name()
+        if code_name is not None and not code_name.empty:
+            rename_map = {"code": "代码", "name": "名称"}
+            normalized = code_name.rename(columns=rename_map)
+            if {"代码", "名称"}.issubset(normalized.columns):
+                return normalized[["代码", "名称"]].copy()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return pd.DataFrame()
+
+
+def _find_cn_symbol_by_akshare(query: str) -> dict | None:
+    if _load_akshare_module() is None:
         return None
 
     spot = _get_akshare_spot_cache()
@@ -119,17 +144,49 @@ def _find_cn_symbol_by_akshare(query: str) -> dict | None:
     }
 
 
-def _find_cn_symbol_offline(query: str) -> dict | None:
-    term = query.strip().lower()
-    for item in CN_COMMON_SYMBOLS:
-        if term in {
-            str(item.get("name", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-            str(item.get("cn_code", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-        }:
-            return item
 
+
+def _find_cn_symbol_by_sina_suggest(query: str) -> dict | None:
+    """使用新浪 suggest 接口动态解析 A 股名称/代码，降低对手工映射依赖。"""
+    term = query.strip()
+    if not term:
+        return None
+
+    url = (
+        "https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key="
+        + urllib.parse.quote(term)
+    )
+
+    try:
+        with urllib.request.urlopen(url, timeout=6) as response:  # noqa: S310
+            raw = response.read()
+        text = raw.decode("gbk", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return None
+
+    # 示例：var suggestvalue="11,600938,中国海油,600938,中国海油,0;...";
+    payload = text.split('"')
+    if len(payload) < 2 or not payload[1].strip():
+        return None
+
+    for item in payload[1].split(";"):
+        parts = item.split(",")
+        if len(parts) < 3:
+            continue
+        code = parts[1].strip()
+        name = parts[2].strip()
+        if re.fullmatch(r"\d{6}", code):
+            return {
+                "name": name or f"A股{code}",
+                "symbol": code,
+                "cn_code": code,
+                "yfinance": _to_yfinance_cn_symbol(code),
+            }
+    return None
+
+def _find_cn_symbol_offline(query: str) -> dict | None:
+    """仅保留 6 位纯代码直通，避免离线名称池覆盖在线检索结果。"""
+    term = query.strip().lower()
     if re.fullmatch(r"\d{6}", term):
         return {
             "name": f"A股{term}",
@@ -138,77 +195,6 @@ def _find_cn_symbol_offline(query: str) -> dict | None:
             "yfinance": _to_yfinance_cn_symbol(term),
         }
     return None
-
-
-@lru_cache(maxsize=1)
-def _get_akshare_spot_cache() -> pd.DataFrame:
-    ak = _load_akshare_module()
-    if ak is None:
-        return pd.DataFrame()
-    try:
-        return ak.stock_zh_a_spot_em()
-    except Exception:  # noqa: BLE001
-        return pd.DataFrame()
-
-
-def _load_akshare_module():
-    spec = importlib.util.find_spec("akshare")
-    if spec is None:
-        return None
-    return importlib.import_module("akshare")
-
-
-def _to_yfinance_cn_symbol(code: str) -> str:
-    if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
-        return f"{code}.SS"
-    if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
-        return f"{code}.SZ"
-    if code.startswith(("430", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "920")):
-        return f"{code}.BJ"
-    return code
-
-
-def _find_cn_symbol_by_akshare(query: str) -> dict | None:
-    ak = _load_akshare_module()
-    if ak is None:
-        return None
-
-    spot = _get_akshare_spot_cache()
-    if spot is None or spot.empty or "代码" not in spot.columns or "名称" not in spot.columns:
-        return None
-
-    term = query.strip().lower()
-    exact = spot[(spot["代码"].astype(str).str.lower() == term) | (spot["名称"].astype(str).str.lower() == term)]
-    if exact.empty:
-        fuzzy = spot[
-            spot["代码"].astype(str).str.lower().str.contains(term, regex=False)
-            | spot["名称"].astype(str).str.lower().str.contains(term, regex=False)
-        ]
-        if fuzzy.empty:
-            return None
-        row = fuzzy.iloc[0]
-    else:
-        row = exact.iloc[0]
-
-    code = str(row["代码"]).zfill(6)
-    name = str(row["名称"])
-    return {
-        "name": name,
-        "symbol": code,
-        "cn_code": code,
-        "yfinance": _to_yfinance_cn_symbol(code),
-    }
-
-
-@lru_cache(maxsize=1)
-def _get_akshare_spot_cache() -> pd.DataFrame:
-    ak = _load_akshare_module()
-    if ak is None:
-        return pd.DataFrame()
-    try:
-        return ak.stock_zh_a_spot_em()
-    except Exception:  # noqa: BLE001
-        return pd.DataFrame()
 
 
 def build_quickstart_config() -> dict:
@@ -350,48 +336,37 @@ def _resolve_symbol_by_source(raw_symbol: str | dict, source: str) -> tuple[str,
 
 
 def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> dict:
-    """按名称/代码模糊查找默认标的。"""
+    """按名称/代码查找标的，优先在线检索。"""
     if not query or not query.strip():
         raise ValueError("请输入名称或代码")
 
-    term = query.strip().lower()
-    pool = symbol_pool or DEFAULT_QUICK_SYMBOLS
+    term = query.strip()
+    term_lower = term.lower()
 
-    for item in pool:
-        candidates = [
-            str(item.get("name", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-            str(item.get("stooq", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-        ]
-        if any(term == c for c in candidates if c):
-            return item
+    # 直通：常见国际代码（例如 AAPL, QQQ, ^GSPC）
+    if re.fullmatch(r"\^?[A-Za-z][A-Za-z0-9._-]{0,14}", term):
+        return {"name": term.upper(), "symbol": term.upper(), "yfinance": term.upper()}
 
-    for item in pool:
-        candidates = [
-            str(item.get("name", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-            str(item.get("stooq", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-        ]
-        if any(term in c for c in candidates if c):
-            return item
-
-    # 回退 1：内置 A 股映射（离线可用）
-    offline_cn = _find_cn_symbol_offline(query)
+    # 回退 1：6 位 A 股代码直通
+    offline_cn = _find_cn_symbol_offline(term)
     if offline_cn is not None:
         return offline_cn
 
-    # 回退 2：尝试实时 A 股库（akshare）
-    cn_symbol = _find_cn_symbol_by_akshare(query)
+    # 回退 2：在线名称检索（不依赖 akshare）
+    sina_symbol = _find_cn_symbol_by_sina_suggest(term)
+    if sina_symbol is not None:
+        return sina_symbol
+
+    # 回退 3：尝试实时 A 股库（akshare）
+    cn_symbol = _find_cn_symbol_by_akshare(term)
     if cn_symbol is not None:
         return cn_symbol
 
     if not is_akshare_available():
         raise ValueError(
-            f"未找到匹配标的: {query}。当前未安装 akshare，建议先执行: pip install akshare"
+            f"未找到匹配标的: {term_lower}。已尝试在线检索；如需更高成功率建议安装 akshare: pip install akshare"
         )
-    raise ValueError(f"未找到匹配标的: {query}（已尝试内置库和 akshare）")
+    raise ValueError(f"未找到匹配标的: {term_lower}（已尝试在线检索和 akshare）")
 
 
 def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -449,17 +424,54 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
 
     start = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     end = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    detail = ak.stock_zh_a_hist_min_em(symbol=cn_code, period="15", adjust="qfq", start_date=start, end_date=end)
+
+    detail: pd.DataFrame | None = None
+    em_error: Exception | None = None
+    try:
+        detail = ak.stock_zh_a_hist_min_em(
+            symbol=cn_code,
+            period="15",
+            adjust="qfq",
+            start_date=start,
+            end_date=end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        em_error = exc
+        logging.warning("akshare 东财分时接口失败（%s）: %s", display, exc)
+
     if detail is None or detail.empty:
+        # 回退：Sina 分时接口（通常不受东财 SSL 波动影响）
+        minute_symbols = [cn_code, _to_prefixed_cn_symbol(cn_code)]
+        for minute_symbol in minute_symbols:
+            try:
+                if hasattr(ak, "stock_zh_a_minute"):
+                    detail = ak.stock_zh_a_minute(symbol=minute_symbol, period="15", adjust="qfq")
+                    if detail is not None and not detail.empty:
+                        break
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("akshare 新浪分时接口失败（%s/%s）: %s", display, minute_symbol, exc)
+                if em_error is None:
+                    em_error = exc
+
+    if detail is None or detail.empty:
+        if em_error is not None:
+            raise ValueError(f"{display} 72h 分时拉取失败（数据源连接不稳定，请稍后重试）") from em_error
         raise ValueError(f"{display} 72h 分时无可用数据")
 
     rename_map = {
         "时间": "Datetime",
+        "day": "Datetime",
+        "date": "Datetime",
         "开盘": "Open",
+        "open": "Open",
         "收盘": "Close",
+        "close": "Close",
         "最高": "High",
+        "high": "High",
         "最低": "Low",
+        "low": "Low",
         "成交量": "Volume",
+        "volume": "Volume",
     }
     detail = detail.rename(columns=rename_map)
     required = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
@@ -468,7 +480,12 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
         raise ValueError(f"{display} 分时字段缺失: {missing}")
 
     detail = detail[required].copy()
-    detail["Datetime"] = pd.to_datetime(detail["Datetime"])
+    detail["Datetime"] = pd.to_datetime(detail["Datetime"], errors="coerce")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        detail[col] = pd.to_numeric(detail[col], errors="coerce")
+
+    detail = detail.dropna(subset=["Datetime", "Open", "High", "Low", "Close"])
+    detail["Volume"] = detail["Volume"].fillna(0.0)
     detail = detail.set_index("Datetime").sort_index()
     detail = detail[detail.index >= cutoff]
     if detail.empty:
