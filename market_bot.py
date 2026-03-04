@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import logging
 import re
@@ -29,6 +30,7 @@ def setup_logger(verbose: bool = False) -> None:
 
 
 REQUIRED_CONFIG_KEYS = ["schedule_times", "history_period", "symbols", "output"]
+MIN_HISTORY_DAYS = 45
 
 
 DEFAULT_QUICK_SYMBOLS = [
@@ -56,7 +58,8 @@ def build_quickstart_config() -> dict:
         "request_retries": 2,
         "request_backoff_seconds": 3,
         "request_pause_seconds": 0.8,
-        "history_period": "3mo",
+        "request_timeout_seconds": 15,
+        "history_period": "45d",
         "symbols": DEFAULT_QUICK_SYMBOLS,
         "output": {"data_dir": "data", "report_dir": "reports"},
     }
@@ -92,7 +95,8 @@ def load_config(config_path: Path) -> dict:
 
 def _period_to_start(period: str) -> dt.datetime:
     now = dt.datetime.now()
-    match = re.match(r"^(\d+)([dwmy])$", period.strip().lower())
+    token = period.strip().lower().replace("mo", "m").replace("yr", "y")
+    match = re.match(r"^(\d+)([dwmy])$", token)
     if not match:
         return now - dt.timedelta(days=180)
 
@@ -107,6 +111,26 @@ def _period_to_start(period: str) -> dt.datetime:
     if unit == "y":
         return now - dt.timedelta(days=amount * 365)
     return now - dt.timedelta(days=180)
+
+
+def normalize_history_period(period: str) -> str:
+    """将历史窗口收敛到满足 20 日指标所需的最小量，避免过度抓取。"""
+    text = (period or "").strip().lower().replace("mo", "m").replace("yr", "y")
+    match = re.match(r"^(\d+)([dwmy])$", text)
+    if not match:
+        return f"{MIN_HISTORY_DAYS}d"
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "d":
+        days = amount
+    elif unit == "w":
+        days = amount * 7
+    elif unit == "m":
+        days = amount * 30
+    else:
+        days = amount * 365
+    return f"{max(days, MIN_HISTORY_DAYS)}d"
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -164,12 +188,85 @@ def _resolve_symbol_by_source(raw_symbol: str | dict, source: str) -> tuple[str,
     raise ValueError(f"标的缺少可用代码: {raw_symbol}")
 
 
+def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> dict:
+    """按名称/代码模糊查找默认标的。"""
+    if not query or not query.strip():
+        raise ValueError("请输入名称或代码")
+
+    term = query.strip().lower()
+    pool = symbol_pool or DEFAULT_QUICK_SYMBOLS
+
+    for item in pool:
+        candidates = [
+            str(item.get("name", "")).lower(),
+            str(item.get("yfinance", "")).lower(),
+            str(item.get("stooq", "")).lower(),
+            str(item.get("symbol", "")).lower(),
+        ]
+        if any(term == c for c in candidates if c):
+            return item
+
+    for item in pool:
+        candidates = [
+            str(item.get("name", "")).lower(),
+            str(item.get("yfinance", "")).lower(),
+            str(item.get("stooq", "")).lower(),
+            str(item.get("symbol", "")).lower(),
+        ]
+        if any(term in c for c in candidates if c):
+            return item
+
+    raise ValueError(f"未找到匹配标的: {query}")
+
+
+def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    close = out["Close"]
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    out["MACD_DIF"] = ema12 - ema26
+    out["MACD_DEA"] = out["MACD_DIF"].ewm(span=9, adjust=False).mean()
+    out["MACD_HIST"] = (out["MACD_DIF"] - out["MACD_DEA"]) * 2
+
+    low_n = out["Low"].rolling(9, min_periods=1).min()
+    high_n = out["High"].rolling(9, min_periods=1).max()
+    rsv = (close - low_n) / (high_n - low_n).replace(0, np.nan) * 100
+    out["K"] = rsv.ewm(com=2, adjust=False).mean()
+    out["D"] = out["K"].ewm(com=2, adjust=False).mean()
+    out["J"] = 3 * out["K"] - 2 * out["D"]
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out["RSI14"] = 100 - (100 / (1 + rs))
+    return out
+
+
+def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame]:
+    """抓取近 72h（以 15m 颗粒度）并计算技术指标。"""
+    display, query_symbol = _resolve_symbol_by_source(raw_symbol, "yfinance")
+    df = yf.Ticker(query_symbol).history(period="5d", interval="15m", auto_adjust=True)
+    if df.empty:
+        raise ValueError(f"{display} 72h 分时无可用数据")
+    df = _normalize_columns(df)
+    cutoff = dt.datetime.now() - dt.timedelta(hours=72)
+    df = df[df.index >= cutoff]
+    if df.empty:
+        raise ValueError(f"{display} 72h 分时无可用数据")
+    return display, _calc_intraday_indicators(df)
+
+
 def fetch_symbol_history_with_retry(
     raw_symbol: str | dict,
     period: str,
     retries: int,
     backoff_seconds: int,
     source_priority: list[str],
+    request_timeout_seconds: int,
 ) -> tuple[str, str, pd.DataFrame]:
     last_error: Exception | None = None
 
@@ -177,8 +274,16 @@ def fetch_symbol_history_with_retry(
         display_symbol, query_symbol = _resolve_symbol_by_source(raw_symbol, source)
         for attempt in range(1, retries + 1):
             try:
-                data = fetch_symbol_history(source, query_symbol, period)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(fetch_symbol_history, source, query_symbol, period)
+                    data = future.result(timeout=request_timeout_seconds)
                 return display_symbol, source, data
+            except concurrent.futures.TimeoutError:
+                last_error = TimeoutError(
+                    f"{display_symbol} via {source} 拉取超时（>{request_timeout_seconds}s）"
+                )
+                logging.warning("%s", last_error)
+                break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 message = str(exc).lower()
@@ -272,21 +377,29 @@ def run_once(config: dict) -> Tuple[Path, Path]:
     retries = int(config.get("request_retries", 3))
     backoff_seconds = int(config.get("request_backoff_seconds", 3))
     pause_seconds = float(config.get("request_pause_seconds", 1.5))
-    source_priority = config.get("source_priority", ["yfinance", "stooq"])
+    request_timeout_seconds = int(config.get("request_timeout_seconds", 15))
+    source_priority = list(config.get("source_priority", ["yfinance", "stooq"]))
+
+    history_period = normalize_history_period(str(config.get("history_period", "45d")))
 
     for raw_symbol in config["symbols"]:
         try:
             symbol_name, source, hist = fetch_symbol_history_with_retry(
                 raw_symbol,
-                config["history_period"],
+                history_period,
                 retries,
                 backoff_seconds,
                 source_priority,
+                request_timeout_seconds,
             )
             safe_name = symbol_name.replace("^", "IDX_").replace("/", "_")
             hist.to_csv(data_dir / f"{safe_name}_{date_tag}.csv")
             summaries.append(build_summary(symbol_name, source, calc_metrics(hist)))
             logging.info("完成: %s (source=%s)", symbol_name, source)
+            if source in source_priority and source_priority[0] != source:
+                source_priority.remove(source)
+                source_priority.insert(0, source)
+                logging.info("已更新数据源优先级（后续优先尝试）: %s", " -> ".join(source_priority))
         except Exception as e:  # noqa: BLE001
             msg = f"{raw_symbol}: {e}"
             errors.append(msg)
@@ -331,7 +444,7 @@ def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str
                 f"- 当日最弱: **{worst['symbol']}** (1日涨跌: {worst['ret_1d(%)']}%)",
                 "",
                 "## 明细表",
-                summary_df.to_markdown(index=False),
+                dataframe_to_markdown(summary_df),
                 "",
             ]
         )
@@ -341,6 +454,14 @@ def write_markdown_report(path: Path, summary_df: pd.DataFrame, errors: List[str
         lines.extend([f"- {e}" for e in errors])
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def dataframe_to_markdown(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        logging.warning("缺少 tabulate，Markdown 表格降级为纯文本输出。建议安装: pip install tabulate")
+        return df.to_string(index=False)
 
 
 def schedule_jobs(config: dict) -> None:
