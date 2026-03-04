@@ -53,20 +53,6 @@ DEFAULT_QUICK_SYMBOLS = [
     {"name": "原油ETF", "yfinance": "USO", "stooq": "USO.US"},
 ]
 
-# 常见 A 股离线映射（避免在 akshare 不可用时无法通过名称检索）
-CN_COMMON_SYMBOLS = [
-    {"name": "中国海油", "symbol": "600938", "cn_code": "600938", "yfinance": "600938.SS"},
-    {"name": "中国石油", "symbol": "601857", "cn_code": "601857", "yfinance": "601857.SS"},
-    {"name": "中国石化", "symbol": "600028", "cn_code": "600028", "yfinance": "600028.SS"},
-    {"name": "贵州茅台", "symbol": "600519", "cn_code": "600519", "yfinance": "600519.SS"},
-    {"name": "宁德时代", "symbol": "300750", "cn_code": "300750", "yfinance": "300750.SZ"},
-    {"name": "比亚迪", "symbol": "002594", "cn_code": "002594", "yfinance": "002594.SZ"},
-    {"name": "招商银行", "symbol": "600036", "cn_code": "600036", "yfinance": "600036.SS"},
-    {"name": "平安银行", "symbol": "000001", "cn_code": "000001", "yfinance": "000001.SZ"},
-    {"name": "万科A", "symbol": "000002", "cn_code": "000002", "yfinance": "000002.SZ"},
-    {"name": "中信证券", "symbol": "600030", "cn_code": "600030", "yfinance": "600030.SS"},
-    {"name": "湖南白银", "symbol": "002716", "cn_code": "002716", "yfinance": "002716.SZ"},
-]
 
 
 def _load_akshare_module():
@@ -199,16 +185,8 @@ def _find_cn_symbol_by_sina_suggest(query: str) -> dict | None:
     return None
 
 def _find_cn_symbol_offline(query: str) -> dict | None:
+    """仅保留 6 位纯代码直通，避免离线名称池覆盖在线检索结果。"""
     term = query.strip().lower()
-    for item in CN_COMMON_SYMBOLS:
-        if term in {
-            str(item.get("name", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-            str(item.get("cn_code", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-        }:
-            return item
-
     if re.fullmatch(r"\d{6}", term):
         return {
             "name": f"A股{term}",
@@ -358,53 +336,37 @@ def _resolve_symbol_by_source(raw_symbol: str | dict, source: str) -> tuple[str,
 
 
 def find_symbol_by_name(query: str, symbol_pool: list[dict] | None = None) -> dict:
-    """按名称/代码模糊查找默认标的。"""
+    """按名称/代码查找标的，优先在线检索。"""
     if not query or not query.strip():
         raise ValueError("请输入名称或代码")
 
-    term = query.strip().lower()
-    pool = symbol_pool or DEFAULT_QUICK_SYMBOLS
+    term = query.strip()
+    term_lower = term.lower()
 
-    for item in pool:
-        candidates = [
-            str(item.get("name", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-            str(item.get("stooq", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-        ]
-        if any(term == c for c in candidates if c):
-            return item
+    # 直通：常见国际代码（例如 AAPL, QQQ, ^GSPC）
+    if re.fullmatch(r"\^?[A-Za-z][A-Za-z0-9._-]{0,14}", term):
+        return {"name": term.upper(), "symbol": term.upper(), "yfinance": term.upper()}
 
-    for item in pool:
-        candidates = [
-            str(item.get("name", "")).lower(),
-            str(item.get("yfinance", "")).lower(),
-            str(item.get("stooq", "")).lower(),
-            str(item.get("symbol", "")).lower(),
-        ]
-        if any(term in c for c in candidates if c):
-            return item
-
-    # 回退 1：内置 A 股映射（离线可用）
-    offline_cn = _find_cn_symbol_offline(query)
+    # 回退 1：6 位 A 股代码直通
+    offline_cn = _find_cn_symbol_offline(term)
     if offline_cn is not None:
         return offline_cn
 
     # 回退 2：在线名称检索（不依赖 akshare）
-    sina_symbol = _find_cn_symbol_by_sina_suggest(query)
+    sina_symbol = _find_cn_symbol_by_sina_suggest(term)
     if sina_symbol is not None:
         return sina_symbol
 
     # 回退 3：尝试实时 A 股库（akshare）
-    cn_symbol = _find_cn_symbol_by_akshare(query)
+    cn_symbol = _find_cn_symbol_by_akshare(term)
     if cn_symbol is not None:
         return cn_symbol
 
     if not is_akshare_available():
         raise ValueError(
-            f"未找到匹配标的: {query}。已尝试内置库与在线检索；如需更高成功率建议安装 akshare: pip install akshare"
+            f"未找到匹配标的: {term_lower}。已尝试在线检索；如需更高成功率建议安装 akshare: pip install akshare"
         )
-    raise ValueError(f"未找到匹配标的: {query}（已尝试内置库、在线检索和 akshare）")
+    raise ValueError(f"未找到匹配标的: {term_lower}（已尝试在线检索和 akshare）")
 
 
 def _calc_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
