@@ -449,8 +449,34 @@ def fetch_intraday_detail_72h(raw_symbol: str | dict) -> tuple[str, pd.DataFrame
 
     start = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     end = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    detail = ak.stock_zh_a_hist_min_em(symbol=cn_code, period="15", adjust="qfq", start_date=start, end_date=end)
+
+    detail: pd.DataFrame | None = None
+    em_error: Exception | None = None
+    try:
+        detail = ak.stock_zh_a_hist_min_em(
+            symbol=cn_code,
+            period="15",
+            adjust="qfq",
+            start_date=start,
+            end_date=end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        em_error = exc
+        logging.warning("akshare 东财分时接口失败（%s）: %s", display, exc)
+
     if detail is None or detail.empty:
+        # 回退：Sina 分时接口（通常不受东财 SSL 波动影响）
+        try:
+            if hasattr(ak, "stock_zh_a_minute"):
+                detail = ak.stock_zh_a_minute(symbol=cn_code, period="15", adjust="qfq")
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("akshare 新浪分时接口失败（%s）: %s", display, exc)
+            if em_error is None:
+                em_error = exc
+
+    if detail is None or detail.empty:
+        if em_error is not None:
+            raise ValueError(f"{display} 72h 分时拉取失败（数据源连接不稳定，请稍后重试）") from em_error
         raise ValueError(f"{display} 72h 分时无可用数据")
 
     rename_map = {
